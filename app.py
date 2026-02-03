@@ -5,141 +5,277 @@ import json
 from firecrawl import FirecrawlApp
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Conversor Inteligente", layout="wide")
+st.set_page_config(page_title="Conversor Híbrido Saipos", layout="wide")
+
+# --- CSS PARA DEIXAR A TELA LIMPA ---
+st.markdown("""
+<style>
+    .block-container {padding-top: 1rem; padding-bottom: 0rem;}
+    h1 {margin-bottom: 0rem;}
+</style>
+""", unsafe_allow_html=True)
 
 # --- CARREGAMENTO DE CHAVES ---
 try:
-    gemini_key = st.secrets["GEMINI_API_KEY"]
-    firecrawl_key = st.secrets["FIRECRAWL_API_KEY"]
-except Exception:
-    st.error("⚠️ ERRO: Chaves de API não configuradas.")
-    st.stop()
+    gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+    firecrawl_key = st.secrets.get("FIRECRAWL_API_KEY", "")
+except:
+    gemini_key = ""
+    firecrawl_key = ""
 
-# --- REGRAS (PROMPT BLINDADO) ---
+# --- PROMPT DEFINITIVO (ATUALIZADO PARA VELOCIDADE) ---
 PROMPT_SAIPOS = """
-[Contexto] importamos cardápios para Excel.
-Precisamos de duas listas: "produtos" e "adicionais".
+[CONTEXTO]
+Na empresa Saipos, realizamos a importação de cardápio para tabela Excel.
+A saída deve ser EXCLUSIVAMENTE um objeto JSON contendo duas listas: "produtos" e "adicionais".
 
 [REGRAS ESTRUTURAIS - CRÍTICO]
-1. Retorne APENAS o código JSON.
-2. NÃO escreva frases como "Aqui está o JSON" ou "Espero ter ajudado".
-3. Comece com { e termine com }.
+1. Você é uma API. Retorne APENAS o JSON. Não inicie com frases como "Aqui está".
+2. Comece a resposta com '{' e termine com '}'.
+3. O JSON DEVE SER MINIFICADO: Gere tudo em uma única linha contínua, sem quebras de linha (\\n) e sem espaços desnecessários. Isso é vital para a performance.
 
-[REGRAS DE NEGÓCIO]
-1. Tipo Produto: Comida, Bebida ou Pizza.
-2. Preço: Ponto para decimais (Ex: 39.99). Se for 0, use 0.0.
-3. [PIZZA]: Categoria="Pizzas", Produto=Tipo, Valor=0. Adicional liga os sabores.
-   Na tab adicionais: Tipo="Sabor Pizza".
-4. [ADICIONAIS]: Use a mesma palavra-chave na coluna 'Adicional' para vincular tabelas.
+[REGRAS DE NEGÓCIO DETALHADAS]
+1. PLANILHA 1 (PRODUTOS):
+   - Tipo: 'Comida', 'Bebida' ou 'Pizza'.
+   - Cuidado: "Pastel sabor pizza" é 'Comida', não 'Pizza'.
+   - Preço: Use ponto para decimais (Ex: 39.99). Se não tiver preço ou for variável, use 0.0.
+   - Descrição: Se não houver, deixe string vazia "".
+   - Imagem: Se houver link/url da imagem, insira. Caso contrário, vazio.
 
-[FORMATO OBRIGATÓRIO DO JSON]
+2. PLANILHA 2 (ADICIONAIS):
+   - Tipo Obrigatório: Use APENAS: 'Sabor Pizza', 'Borda Pizza', 'Massa Pizza' ou 'Outros'.
+   - Se o item não for estrutura de pizza (ex: Molhos, Bebidas, Complementos), o tipo é SEMPRE 'Outros'.
+
+3. VÍNCULOS (IMPORTANTE):
+   - A coluna 'Adicional' é a chave de ligação. Use EXATAMENTE a mesma palavra-chave na tabela de Produtos e na de Adicionais para conectá-los.
+
+4. REGRAS ESPECÍFICAS:
+   - [PIZZA]: Categoria="Pizzas", Produto="Nome da Pizza", Preço=0. O 'Adicional' liga aos sabores.
+     Na aba Adicionais: Tipo="Sabor Pizza", Item="Calabresa", Preço=35.90.
+   - [NOMES DUPLICADOS]: Se existir "Carne" em Hamburguer e em Pastel, renomeie para "Hambúrguer de Carne" e "Pastel de Carne".
+   - [PREÇO VARIÁVEL]: Se o preço varia pelo sabor/tamanho, o Produto fica com Preço=0 e os itens na aba Adicionais recebem o preço. Defina Mínimo=1 para obrigar a escolha.
+
+[ESTRUTURA JSON OBRIGATÓRIA]
 {
   "produtos": [
-    {"Categoria": "", "Tipo": "", "Produto": "", "Preço": 0.0, "Descrição": "", "Adicional": ""}
+    {
+      "Categoria": "string", "Tipo": "string", "Produto": "string", 
+      "Preço": 0.0, "Descrição": "string", "Adicional": "string", "Imagem": "string"
+    }
   ],
   "adicionais": [
-    {"Tipo": "", "Adicional": "", "Mínimo": 0, "Máximo": 0, "Item": "", "Preço": 0.0, "Descrição": ""}
+    {
+      "Tipo": "string", "Adicional": "string", "Mínimo": 0, "Máximo": 0, 
+      "Item": "string", "Preço": 0.0, "Descrição": "string", "Imagem": "string"
+    }
   ]
 }
 """
 
-# --- CONFIGURAÇÃO DA IA ---
-genai.configure(api_key=gemini_key)
-model = genai.GenerativeModel('models/gemini-flash-latest')
+# --- FUNÇÃO DE PROCESSAMENTO
+def processar_json_para_excel(texto_json):
+    # 1. Limpeza
+    start_index = texto_json.find('{')
+    end_index = texto_json.rfind('}') + 1
+    
+    if start_index != -1 and end_index != -1:
+        json_clean = texto_json[start_index:end_index]
+        try:
+            data = json.loads(json_clean)
+        except json.JSONDecodeError:
+             raise ValueError("Erro de formatação no JSON gerado.")
+    else:
+        raise ValueError("JSON não encontrado na resposta.")
 
-st.title("🍽️ Conversor de Cardápios para Excel")
+    # 2. Cria DataFrames
+    df_prod = pd.DataFrame(data.get("produtos", []))
+    df_add = pd.DataFrame(data.get("adicionais", []))
 
-# --- OPÇÕES ---
-OPT_ARQUIVO = "📂 Arquivo (PDF/Imagem)"
-OPT_LINK = "🔗 Link Automático (Site)"
+    # --- PADRONIZAÇÃO TABELA PRODUTOS ---
+    if not df_prod.empty:
+        # Injeta colunas fixas
+        df_prod["COR"] = "Padrão"
+        df_prod["ATIVO"] = "Sim"
+        df_prod["DISPONIBILIDADE"] = "Delivery e Salão"
+        df_prod["CÓDIGO"] = "" # Código vazio
+        
+        # Garante colunas variáveis
+        cols_vars = ["Categoria", "Tipo", "Produto", "Preço", "Descrição", "Adicional", "Imagem"]
+        for col in cols_vars:
+            if col not in df_prod.columns: df_prod[col] = ""
 
-tipo_entrada = st.radio("Fonte:", [OPT_ARQUIVO, OPT_LINK], horizontal=True)
+        # Renomeia para Maiúsculas
+        df_prod = df_prod.rename(columns={
+            "Categoria": "CATEGORIA", "Tipo": "TIPO", "Produto": "PRODUTO", 
+            "Preço": "PREÇO", "Descrição": "DESCRIÇÃO", "Adicional": "ADICIONAL",
+            "Imagem": "IMAGEM"
+        })
+        
+        # ORDENAÇÃO PRODUTOS
+        df_prod = df_prod[[
+            "COR", "CATEGORIA", "ATIVO", "DISPONIBILIDADE", "TIPO", 
+            "PRODUTO", "PREÇO", "DESCRIÇÃO", "ADICIONAL", "CÓDIGO", "IMAGEM"
+        ]]
 
-content_parts = []
-executar = False
+    # --- PADRONIZAÇÃO TABELA ADICIONAIS ---
+    if not df_add.empty:
+        # Injeta colunas fixas
+        df_add["ATIVO"] = "Sim"
+        df_add["CÓDIGO"] = "" # COLUNA DE CÓDIGO VAZIA
+        
+        
+        cols_vars_add = ["Tipo", "Adicional", "Mínimo", "Máximo", "Item", "Preço", "Descrição", "Imagem"]
+        for col in cols_vars_add:
+            if col not in df_add.columns: df_add[col] = ""
 
-# --- LÓGICA 1: ARQUIVO ---
-if tipo_entrada == OPT_ARQUIVO:
-    uploaded_file = st.file_uploader("Arraste o arquivo aqui", type=["png", "jpg", "jpeg", "pdf"])
-    if uploaded_file:
-        # Envio do prompt junto com a imagem
-        content_parts = [PROMPT_SAIPOS, {"mime_type": uploaded_file.type, "data": uploaded_file.getvalue()}]
-        executar = st.button("Iniciar Conversão")
+       
+        df_add = df_add.rename(columns={
+            "Tipo": "TIPO", "Adicional": "ADICIONAL", "Mínimo": "MÍNIMO", 
+            "Máximo": "MÁXIMO", "Item": "ITEM", "Preço": "PREÇO", 
+            "Descrição": "DESCRIÇÃO", "Imagem": "IMAGEM"
+        })
 
-# --- LÓGICA 2: LINK ---
-elif tipo_entrada == OPT_LINK:
-    url_input = st.text_input("Cole o Link:")
-    if url_input and st.button("Iniciar Conversão"):
-        with st.spinner("🕷️ Acessando site..."):
+       
+        df_add = df_add[[
+            "TIPO", "ADICIONAL", "MÍNIMO", "MÁXIMO", "ATIVO", 
+            "ITEM", "PREÇO", "DESCRIÇÃO", "CÓDIGO", "IMAGEM"
+        ]]
+    
+    return df_prod, df_add
+
+# --- FUNÇÕES AUXILIARES ---
+def limpar_manual():
+    st.session_state.json_manual = ""
+    st.session_state.df_prod_manual = None
+    st.session_state.df_add_manual = None
+
+def limpar_auto():
+    st.session_state.df_prod_auto = None
+    st.session_state.df_add_auto = None
+
+st.title("🍽️ Conversor de Cardápios")
+
+modo = st.radio("Modo:", ["🤖 Automático (API)", "🧠 Manual (Gemini Site)"], horizontal=True, label_visibility="collapsed")
+st.markdown("---")
+
+# MODO MANUAL
+if modo == "🧠 Manual (Gemini Site)":
+    
+    with st.expander("📄 CLIQUE AQUI PARA PEGAR O PROMPT (COPIAR)", expanded=False):
+        st.code(PROMPT_SAIPOS, language="json")
+        st.caption("👆 Copie este prompt completo e cole no Gemini.")
+
+    col_esq, col_dir = st.columns([1, 1])
+
+    with col_esq:
+        if "json_manual" not in st.session_state:
+            st.session_state.json_manual = ""
+
+        input_area = st.text_area(
+            "Cole a resposta da IA aqui:", 
+            value=st.session_state.json_manual,
+            height=400, 
+            key="json_manual",
+            placeholder='Cole aqui o JSON gerado...'
+        )
+        
+        c_btn1, c_btn2 = st.columns([2, 1])
+        with c_btn1:
+            btn_converter = st.button("🔄 CONVERTER", type="primary", use_container_width=True)
+        with c_btn2:
+            st.button("🧹 LIMPAR", on_click=limpar_manual, use_container_width=True)
+
+    with col_dir:
+        # Processamento Manual
+        if btn_converter and input_area:
+            try:
+                df_p, df_a = processar_json_para_excel(input_area)
+                st.session_state.df_prod_manual = df_p
+                st.session_state.df_add_manual = df_a
+                st.success("✅ Convertido com Sucesso!")
+            except Exception as e:
+                st.error("Erro ao ler JSON. Verifique se copiou a resposta inteira.")
+                with st.expander("Detalhes do erro"):
+                    st.write(e)
+
+        # Exibição Persistente
+        if st.session_state.get('df_prod_manual') is not None:
+            tab_p, tab_a = st.tabs(["Produtos", "Adicionais"])
+            with tab_p:
+                df_p = st.session_state.df_prod_manual
+                st.dataframe(df_p, hide_index=True, use_container_width=True)
+                st.download_button("💾 Baixar Produtos", df_p.to_csv(index=False, sep=';', encoding='utf-8-sig'), "produtos.csv", use_container_width=True)
+            with tab_a:
+                df_a = st.session_state.df_add_manual
+                st.dataframe(df_a, hide_index=True, use_container_width=True)
+                st.download_button("💾 Baixar Adicionais", df_a.to_csv(index=False, sep=';', encoding='utf-8-sig'), "adicionais.csv", use_container_width=True)
+        elif not input_area:
+            st.info("👈 Cole o JSON na esquerda e clique em Converter.")
+
+# MODO AUTOMÁTICO
+elif modo == "🤖 Automático (API)":
+    if not gemini_key:
+        st.error("⚠️ Chave GEMINI_API_KEY não configurada.")
+        st.stop()
+
+    genai.configure(api_key=gemini_key)
+    model = genai.GenerativeModel('models/gemini-flash-latest')
+
+    # Inicializa memória
+    if "df_prod_auto" not in st.session_state: st.session_state.df_prod_auto = None
+    if "df_add_auto" not in st.session_state: st.session_state.df_add_auto = None
+
+    tipo_entrada = st.radio("Fonte:", ["📂 Arquivo", "🔗 Link"], horizontal=True)
+    executar_auto = False
+    content_parts = []
+
+    if tipo_entrada == "📂 Arquivo":
+        f = st.file_uploader("Upload", type=["png", "jpg", "pdf"])
+        if f:
+            content_parts = [PROMPT_SAIPOS, {"mime_type": f.type, "data": f.getvalue()}]
+            if st.button("🚀 INICIAR CONVERSÃO", type="primary"):
+                executar_auto = True
+
+    elif tipo_entrada == "🔗 Link":
+        url = st.text_input("Link:")
+        if url and st.button("🚀 INICIAR CONVERSÃO", type="primary"):
             try:
                 app = FirecrawlApp(api_key=firecrawl_key)
-                scrape_result = app.scrape(url_input, formats=['markdown'])
+                res = app.scrape(url, formats=['markdown'])
+                md = res.get('markdown', "") or res.get('data', {}).get('markdown', "")
+                if md:
+                    content_parts = [f"{PROMPT_SAIPOS}\nSITE:\n{md}"]
+                    executar_auto = True
+            except: st.error("Erro no link")
+
+    # Processamento Automático
+    if executar_auto and content_parts:
+        with st.spinner('🤖 Inteligência Artificial processando...'):
+            try:
+                resp = model.generate_content(content_parts)
+                df_p, df_a = processar_json_para_excel(resp.text)
                 
-                markdown_site = ""
-                if hasattr(scrape_result, 'markdown'):
-                    markdown_site = scrape_result.markdown
-                elif isinstance(scrape_result, dict):
-                    markdown_site = scrape_result.get('markdown', "")
-                    if not markdown_site and 'data' in scrape_result:
-                        markdown_site = scrape_result['data'].get('markdown', "")
-                
-                if markdown_site:
-                    user_prompt = f"{PROMPT_SAIPOS}\n\n[DADOS DO SITE]:\n{markdown_site}"
-                    content_parts = [user_prompt]
-                    executar = True
-                else:
-                    st.error("Site vazio.")
-            except Exception as e:
-                st.error(f"Erro no link: {e}")
+                # Salva na memória
+                st.session_state.df_prod_auto = df_p
+                st.session_state.df_add_auto = df_a
+                st.success("✅ Sucesso!")
+            except Exception as e: 
+                st.error(f"Erro: {e}")
 
-# --- PROCESSAMENTO ---
-if executar and content_parts:
-    with st.spinner('Processando...'):
-        try:
-            response = model.generate_content(content_parts)
-            text_resp = response.text
+    # Exibição Automática
+    if st.session_state.df_prod_auto is not None:
+        st.markdown("---")
+        tab_p, tab_a = st.tabs(["Produtos", "Adicionais"])
+        
+        with tab_p:
+            df_p = st.session_state.df_prod_auto
+            st.dataframe(df_p, hide_index=True, use_container_width=True)
+            st.download_button("💾 Baixar Produtos", df_p.to_csv(index=False, sep=';', encoding='utf-8-sig'), "produtos_auto.csv", use_container_width=True)
+        
+        with tab_a:
+            df_a = st.session_state.df_add_auto
+            st.dataframe(df_a, hide_index=True, use_container_width=True)
+            st.download_button("💾 Baixar Adicionais", df_a.to_csv(index=False, sep=';', encoding='utf-8-sig'), "adicionais_auto.csv", use_container_width=True)
             
-            # --- LIMPEZA DO JSON ---
-            start_index = text_resp.find('{')
-            end_index = text_resp.rfind('}') + 1
-            
-            if start_index != -1 and end_index != -1:
-                json_clean = text_resp[start_index:end_index]
-                data = json.loads(json_clean)
-            else:
-                st.error("A IA não gerou dados válidos. Veja a resposta bruta abaixo:")
-                st.code(text_resp)
-                st.stop()
-
-            # --- Criação das Tabelas ---
-            df_prod = pd.DataFrame(data.get("produtos", []))
-            df_add = pd.DataFrame(data.get("adicionais", []))
-
-            # Garante colunas vazias se não existirem
-            cols_prod = ["Categoria", "Tipo", "Produto", "Preço", "Descrição", "Adicional"]
-            for c in cols_prod: 
-                if c not in df_prod.columns: df_prod[c] = ""
-            df_prod = df_prod[cols_prod]
-
-            cols_add = ["Tipo", "Adicional", "Mínimo", "Máximo", "Item", "Preço", "Descrição"]
-            for c in cols_add: 
-                if c not in df_add.columns: df_add[c] = ""
-            df_add = df_add[cols_add]
-
-            st.success("✅ Sucesso!")
-            
-            tab1, tab2 = st.tabs(["📋 Produtos", "➕ Adicionais"])
-            with tab1:
-                st.dataframe(df_prod, hide_index=True)
-                if not df_prod.empty:
-                    st.download_button("💾 Baixar Produtos", df_prod.to_csv(index=False, sep=';', encoding='utf-8-sig'), "produtos.csv")
-                else:
-                    st.warning("Lista vazia. Verifique se o arquivo está legível.")
-            
-            with tab2:
-                st.dataframe(df_add, hide_index=True)
-                if not df_add.empty:
-                    st.download_button("💾 Baixar Adicionais", df_add.to_csv(index=False, sep=';', encoding='utf-8-sig'), "adicionais.csv")
-
-        except Exception as e:
-            st.error(f"Erro ao processar: {e}")
+        if st.button("🔄 Nova Conversão (Limpar)", on_click=limpar_auto):
+            pass
