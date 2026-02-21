@@ -4,10 +4,8 @@ import pandas as pd
 import json
 from firecrawl import FirecrawlApp
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
+# CONFIGURAÇÃO DA PÁGINA
 st.set_page_config(page_title="Conversor Híbrido Saipos", layout="wide")
-
-# --- CSS PARA DEIXAR A TELA LIMPA ---
 st.markdown("""
 <style>
     .block-container {padding-top: 1rem; padding-bottom: 0rem;}
@@ -15,7 +13,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- CARREGAMENTO DE CHAVES ---
+# API
 try:
     gemini_key = st.secrets.get("GEMINI_API_KEY", "")
     firecrawl_key = st.secrets.get("FIRECRAWL_API_KEY", "")
@@ -23,58 +21,78 @@ except:
     gemini_key = ""
     firecrawl_key = ""
 
-# --- PROMPT DEFINITIVO (ATUALIZADO PARA VELOCIDADE) ---
+# PROMPT
 PROMPT_SAIPOS = """
-[CONTEXTO]
-Na empresa Saipos, realizamos a importação de cardápio para tabela Excel.
-A saída deve ser EXCLUSIVAMENTE um objeto JSON contendo duas listas: "produtos" e "adicionais".
+[Contexto] Na empresa Saipos, realizamos a importação de cardápio para tabela excel. Essa tebela compreende em duas planilhas: Produto e Adicionais. Na primeira tabela, estão as colunas:
+Categoria | Tipo | Produto | Preço | Descrição | Adicional | Imagem
+Na segunda categoria, possuem as colunas:
+Tipo | Adicional | Mínimo | Máximo | Item | Preço | Descrição | Imagem
 
-[REGRAS ESTRUTURAIS - CRÍTICO]
-1. Você é uma API. Retorne APENAS o JSON. Não inicie com frases como "Aqui está".
+[Observações]
+1- Na planilha 1 (produtos), o tipo pode ser: Comida ou Bebida ou Pizza (Detalhe exemplo: Cuidar para que um Pastel sabor pizza não seja considerado como Pizza mas sim como Comida). 
+2- O preço será sempre com um . separado os decimais!
+3- Caso o item não tenha descrição, deixar em branco.
+4- Na planilha 2 (adicionais), o tipo poderá ser 'Outros', 'Sabor Pizza', 'Borda Pizza', 'Massa Pizza'. Ou seja, se não tiver relação com pizza (é o item pizza e não sabor de pastel pizza por exemplo), será sempre 'Outro'.
+5- Caso um produto tenha adicional, a coluna Adicional será usada para linkar os adicionais do produto com uma palavra chave que represente o conjunto de adicionais e deve ser a mesma palavra em ambas as tabelas. Caso um item não tenha adicional, basta deixar em branco a linha da coluna.
+6- Mínimo e máximo dos adicionais deve ser respeitado o que estiver no cardápio em anexo, mas caso não possua essa informação, deixar o espaço da linha em branco.
+7- Atentar ao nome da categoria para respeitar conforme o cardápio em anexo e não gerar categ inexist.
+8- Imagem: Se houver link/url da imagem do produto ou adicional, insira. Caso contrário, deixe string vazia "".
+
+[Exemplos]
+Planilha 1 (Produtos): 
+Hambúrgueres | Comida | Smash Simples | 39.99 | Pão, hambúrguer, alface e tomate. | Escolha seus molhos | ""
+Pastéis | Comida | Pastel de Carne | 7.89 | | Sabor extra | "https://linkdaimagem.com/pastel.jpg"
+
+Planilha 2 (Adicionais):
+Outro | Escolha seus molhos | 0 | 5 | Molho Mostarda | 2.99 | | ""
+Outro | Escolha seus molhos | 0 | 5 | Maionese Verde | 2.99 | Maionese Temperada | ""
+Outro | Sabor extra | 0 | 1 | Queijo | 5.00 | | ""
+
+[PIZZA] Caso seja um cardápio de pizza:
+A categoria será "Pizzas", no produto o tipo da pizza, no valor sempre 0 e descrição caso houver, e no Adicionais, colocar a palavra chave que vai ligar os sabores da pizza ao produto.
+Exemplo:
+Categoria | Produto | Valor (somente o numero com . separando o decimal) | Descrição | Adicional
+Pizzas | Pizza Tradicional Pequena | 0.0 | Escolha o sabor de sua pizza! | Sabores Pizza Tradicional Pequena
+
+Na segunda planilha, aplicar da seguinte forma:
+Tipo | Adicional | Mínimo de sabores na pizza (sempre 1 pelo menos) | Máximo de sabores na pizza | Item (sabor da pizza) | Preço | Descrição
+Sabor Pizza | Sabores Pizza Tradicional Pequena | 1 | 1 | Calabresa | 34.99 | molho de tomate, queijo mussarela, calabresa e orégano.
+
+[DETALHES]
+Essa planilha subirá para um site de delivery. O nome do produto e o nome do adicional, e os preços serão impressos na via de cozinha para que seja preparado o pedido. Ou seja, se dois itens de categorias diferentes estiverem com o mesmo nome, por exemplo "Carne", o cozinheiro não saberá do que se trata aquele pedido. Exemplo:
+Categoria | Produto
+Hamburgueres | Carne
+Pastéis | Carne
+Portanto, deve-se aplicar o nome da categoria a fim de identificar na impressão. Exemplo:
+Hamburgueres | Hambúrguer de Carne
+Pastéis | Pastel de Carne
+
+Em alguns cardápios, pode ser que um determinado produto não tenha preço direto, onde o preço pode variar com o sabor (ou algum outro) que o cliente escolher. Nesses casos, na primeira tabela (Produtos), deixe o produto com o preço zerado (0.00) e aplique os sabores na segunda tabela 'Adicionais' para que o cliente escolha o sabor do pedido e na coluna 'Mínimo', deixe como "1". Desta forma, o cliente será obrigado a escolher um sabor e pagar o preço determinado. Exemplo:
+Categoria | Tipo | Produto | Preço | Descrição | Adicional
+Pastéis | Comida | Pastel Premium | 0.0 | Escolha o sabor de seu pastel! | Sabores Pastéis
+
+Tipo | Adicional | Mínimo | Máximo | Item | Preço | Descrição
+Outro | Sabores Pastéis | 1 | 1 | Carne | 7.99 | | 
+Outro | Sabores Pastéis | 1 | 1 | Frango | 6.99 | | 
+
+Importante! Caso um segundo produto tenha a mesma lista de adicionais do outro (nome, valor), utilize a mesma palavra-chave para não gerar duplicação.
+Caso tenha mais de uma lista de adicionais, aplicar junto na mesma coluna porém, com uma vírgula separando as palavras chave: Incremente seu Hamburguer, Escolha uma bebida
+Outro detalhe: Se algum item possuir em sua descrição informando que o cliente pode escolher entre determinado ingrediente ou acompanhamento, aplique esses itens que o cliente deverá escolher nos adicionais e deixe como obrigatório a seleção pelo cliente (mínimo 1).
+
+Não crie produtos que não existem no cardápio. Não altere o nome do item que está no cardápio de forma que fique com nome diferente, dando a entender que seja outro item. Extraia o cardápio completo, do início ao fim sem deixar nada faltando.
+
+[REGRAS DE SISTEMA OBRIGATÓRIAS - CRÍTICO]
+A partir de agora, você atua como uma API. 
+1. A saída deve ser EXCLUSIVAMENTE um objeto JSON. Não escreva NADA além do JSON. Não inicie com "Aqui está" nem use formatação markdown como ```json.
 2. Comece a resposta com '{' e termine com '}'.
-3. O JSON DEVE SER MINIFICADO: Gere tudo em uma única linha contínua, sem quebras de linha (\\n) e sem espaços desnecessários. Isso é vital para a performance.
-
-[REGRAS DE NEGÓCIO DETALHADAS]
-1. PLANILHA 1 (PRODUTOS):
-   - Tipo: 'Comida', 'Bebida' ou 'Pizza'.
-   - Cuidado: "Pastel sabor pizza" é 'Comida', não 'Pizza'.
-   - Preço: Use ponto para decimais (Ex: 39.99). Se não tiver preço ou for variável, use 0.0.
-   - Descrição: Se não houver, deixe string vazia "".
-   - Imagem: Se houver link/url da imagem, insira. Caso contrário, vazio.
-
-2. PLANILHA 2 (ADICIONAIS):
-   - Tipo Obrigatório: Use APENAS: 'Sabor Pizza', 'Borda Pizza', 'Massa Pizza' ou 'Outros'.
-   - Se o item não for estrutura de pizza (ex: Molhos, Bebidas, Complementos), o tipo é SEMPRE 'Outros'.
-
-3. VÍNCULOS (IMPORTANTE):
-   - A coluna 'Adicional' é a chave de ligação. Use EXATAMENTE a mesma palavra-chave na tabela de Produtos e na de Adicionais para conectá-los.
-
-4. REGRAS ESPECÍFICAS:
-   - [PIZZA]: Categoria="Pizzas", Produto="Nome da Pizza", Preço=0. O 'Adicional' liga aos sabores.
-     Na aba Adicionais: Tipo="Sabor Pizza", Item="Calabresa", Preço=35.90.
-   - [NOMES DUPLICADOS]: Se existir "Carne" em Hamburguer e em Pastel, renomeie para "Hambúrguer de Carne" e "Pastel de Carne".
-   - [PREÇO VARIÁVEL]: Se o preço varia pelo sabor/tamanho, o Produto fica com Preço=0 e os itens na aba Adicionais recebem o preço. Defina Mínimo=1 para obrigar a escolha.
-
-[ESTRUTURA JSON OBRIGATÓRIA]
-{
-  "produtos": [
-    {
-      "Categoria": "string", "Tipo": "string", "Produto": "string", 
-      "Preço": 0.0, "Descrição": "string", "Adicional": "string", "Imagem": "string"
-    }
-  ],
-  "adicionais": [
-    {
-      "Tipo": "string", "Adicional": "string", "Mínimo": 0, "Máximo": 0, 
-      "Item": "string", "Preço": 0.0, "Descrição": "string", "Imagem": "string"
-    }
-  ]
-}
+3. O JSON DEVE SER MINIFICADO: Gere tudo em uma única linha contínua, sem quebras de linha (\\n) e sem espaços em branco desnecessários. Isso é vital para a performance.
+4. Siga ESTRITAMENTE esta estrutura de chaves (os nomes devem ser exatos). Se não houver Imagem, mande string vazia "". Se não houver Min/Max, mande 0:
+{"produtos":[{"Categoria":"string","Tipo":"string","Produto":"string","Preço":0.0,"Descrição":"string","Adicional":"string","Imagem":"string"}],"adicionais":[{"Tipo":"string","Adicional":"string","Mínimo":0,"Máximo":0,"Item":"string","Preço":0.0,"Descrição":"string","Imagem":"string"}]}
 """
 
-# --- FUNÇÃO DE PROCESSAMENTO
+# PROCESSAMENTO
 def processar_json_para_excel(texto_json):
-    # 1. Limpeza
+    # Limpeza
     start_index = texto_json.find('{')
     end_index = texto_json.rfind('}') + 1
     
@@ -87,13 +105,13 @@ def processar_json_para_excel(texto_json):
     else:
         raise ValueError("JSON não encontrado na resposta.")
 
-    # 2. Cria DataFrames
+    # Cria DataFrames
     df_prod = pd.DataFrame(data.get("produtos", []))
     df_add = pd.DataFrame(data.get("adicionais", []))
 
-    # --- PADRONIZAÇÃO TABELA PRODUTOS ---
+    # PADRONIZAÇÃO TABELA PRODUTOS
     if not df_prod.empty:
-        # Injeta colunas fixas
+        # Colunas fixas
         df_prod["COR"] = "Padrão"
         df_prod["ATIVO"] = "Sim"
         df_prod["DISPONIBILIDADE"] = "Delivery e Salão"
@@ -117,25 +135,24 @@ def processar_json_para_excel(texto_json):
             "PRODUTO", "PREÇO", "DESCRIÇÃO", "ADICIONAL", "CÓDIGO", "IMAGEM"
         ]]
 
-    # --- PADRONIZAÇÃO TABELA ADICIONAIS ---
+    # PADRONIZAÇÃO TABELA ADICIONAIS
     if not df_add.empty:
-        # Injeta colunas fixas
+        # Colunas fixas
         df_add["ATIVO"] = "Sim"
-        df_add["CÓDIGO"] = "" # COLUNA DE CÓDIGO VAZIA
-        
+        df_add["CÓDIGO"] = ""
         
         cols_vars_add = ["Tipo", "Adicional", "Mínimo", "Máximo", "Item", "Preço", "Descrição", "Imagem"]
         for col in cols_vars_add:
             if col not in df_add.columns: df_add[col] = ""
 
-       
+        # Renomeia
         df_add = df_add.rename(columns={
             "Tipo": "TIPO", "Adicional": "ADICIONAL", "Mínimo": "MÍNIMO", 
             "Máximo": "MÁXIMO", "Item": "ITEM", "Preço": "PREÇO", 
             "Descrição": "DESCRIÇÃO", "Imagem": "IMAGEM"
         })
 
-       
+        # ORDENAÇÃO FINAL ADICIONAIS
         df_add = df_add[[
             "TIPO", "ADICIONAL", "MÍNIMO", "MÁXIMO", "ATIVO", 
             "ITEM", "PREÇO", "DESCRIÇÃO", "CÓDIGO", "IMAGEM"
@@ -143,7 +160,7 @@ def processar_json_para_excel(texto_json):
     
     return df_prod, df_add
 
-# --- FUNÇÕES AUXILIARES ---
+# FUNÇÕES AUXILIARES
 def limpar_manual():
     st.session_state.json_manual = ""
     st.session_state.df_prod_manual = None
@@ -153,8 +170,8 @@ def limpar_auto():
     st.session_state.df_prod_auto = None
     st.session_state.df_add_auto = None
 
+# INTERFACE PRINCIPAL
 st.title("🍽️ Conversor de Cardápios")
-
 modo = st.radio("Modo:", ["🤖 Automático (API)", "🧠 Manual (Gemini Site)"], horizontal=True, label_visibility="collapsed")
 st.markdown("---")
 
